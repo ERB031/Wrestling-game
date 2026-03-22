@@ -23,35 +23,38 @@ def initialize_world(state):
     """Set up the game world - rosters, titles, calendar."""
     from game.world.npcs import generate_roster
     from game.world.promotions import PROMOTIONS
-    from game.world.titles import initialize_titles
-    from game.world.calendar import setup_ppv_schedule
+    from game.world.titles import TitleManager
+    from game.world.calendar import Calendar
 
     # Generate rosters for all promotions
     for promo_id, promo in PROMOTIONS.items():
         if promo_id == "retirement":
             continue
-        roster = generate_roster(promo_id, promo.get("roster_size", 12))
+        roster = generate_roster(promo)
         state.promotion_rosters[promo_id] = roster
         for npc in roster:
             state.register_npc(npc)
 
     # Initialize titles
-    initialize_titles(state)
+    state.title_manager = TitleManager()
+    state.title_manager.initialize_titles(PROMOTIONS, state.promotion_rosters)
 
-    # Setup PPV schedule
-    setup_ppv_schedule(state)
+    # Setup calendar
+    state.calendar = Calendar()
+    state.calendar.schedule_month([state.player.current_promotion])
 
     # Set initial contract
     promo_id = state.player.current_promotion
-    promo = PROMOTIONS.get(promo_id, {})
+    promo = PROMOTIONS.get(promo_id)
     state.contract = {
         "promotion_id": promo_id,
         "weeks_remaining": 52,
-        "pay_per_show": promo.get("pay_scale", (0, 100))[0],
-        "exclusive": promo.get("tier", 1) >= 3,
+        "pay_per_show": promo.pay_min if promo else 0,
+        "exclusive": promo.tier >= 3 if promo else False,
     }
 
-    state.log_career_event(f"Signed first contract with {promo.get('name', promo_id)}")
+    promo_name = promo.name if promo else promo_id
+    state.log_career_event(f"Signed first contract with {promo_name}")
 
 
 def game_loop(state):
@@ -71,17 +74,14 @@ def run_week(state):
     from game.events.manager import process_weekly_events
     from game.systems.lifestyle import tick_addictions, check_lifestyle_events
     from game.systems.injury import process_injury_recovery
-    from game.world.calendar import is_ppv_week, advance_week
-    from game.world.contracts import check_contract
-    from game.character.skills import apply_age_decline
 
     player = state.player
 
     # Display weekly header
     clear_screen()
     from game.world.promotions import PROMOTIONS
-    promo = PROMOTIONS.get(player.current_promotion, {})
-    promo_name = promo.get("name", player.current_promotion)
+    promo = PROMOTIONS.get(player.current_promotion)
+    promo_name = promo.name if promo else player.current_promotion
     print_week_header(state.current_week, state.current_year, promo_name, player)
 
     # Check for injuries preventing action
@@ -104,7 +104,7 @@ def run_week(state):
     check_lifestyle_events(state)
 
     # Show phase - match if booked
-    ppv = is_ppv_week(state)
+    ppv = _is_ppv_week(state)
     if player.can_wrestle():
         show_phase(state, is_ppv=ppv)
     else:
@@ -128,7 +128,7 @@ def run_week(state):
     if state.contract:
         state.contract["weeks_remaining"] -= 1
         if state.contract["weeks_remaining"] <= 0:
-            check_contract(state)
+            _handle_contract_expiry(state)
 
     # Monthly checks (every 4 weeks)
     if state.current_week % 4 == 0:
@@ -139,7 +139,7 @@ def run_week(state):
         yearly_phase(state)
 
     # Advance calendar
-    advance_week(state)
+    _advance_week(state)
 
     # Autosave at PPVs
     if ppv:
@@ -170,12 +170,13 @@ def show_phase(state, is_ppv=False):
     if not opponent:
         return
 
-    promo = PROMOTIONS.get(player.current_promotion, {})
+    promo = PROMOTIONS.get(player.current_promotion)
 
     # Determine match type
-    from game.match.match_types import get_available_match_types
+    from game.match.simulation import get_available_match_types
+    violence_tolerance = promo.violence_tolerance if promo else 5
     available_types = get_available_match_types(
-        promo.get("violence_tolerance", 5),
+        violence_tolerance,
         player.get_effective_skill("violence"),
     )
 
@@ -396,7 +397,6 @@ def off_day_phase(state):
 
 def monthly_phase(state):
     """Monthly career checks."""
-    from game.world.contracts import check_promotion_offers
     from game.systems.reputation import calculate_push_level
 
     player = state.player
@@ -404,13 +404,11 @@ def monthly_phase(state):
     # Update push level
     player.momentum = calculate_push_level(player)
 
-    # Check for promotion interest
-    check_promotion_offers(state)
-
     # Financial check
     player.money -= 200 * 4  # Monthly expenses
     if player.money < 0:
-        print(f"\n  {colored('You\\'re broke. Living paycheck to paycheck.', Colors.WARNING)}")
+        _msg = "You're broke. Living paycheck to paycheck."
+        print(f"\n  {colored(_msg, Colors.WARNING)}")
         player.burnout += 5
 
     # Title defense tracking
@@ -420,7 +418,7 @@ def monthly_phase(state):
 
 def yearly_phase(state):
     """Yearly career milestones."""
-    from game.character.skills import apply_age_decline, check_skill_milestones
+    from game.character.skills import check_skill_milestones
     from game.systems.aging import process_aging, check_retirement_prompt
 
     player = state.player
@@ -485,6 +483,110 @@ def weekly_menu(state):
             state.log_career_event(f"Retired from professional wrestling at age {state.player.age}")
 
 
+def _is_ppv_week(state):
+    """Check if current week is a PPV week."""
+    if hasattr(state, 'calendar') and state.calendar:
+        return state.calendar.is_ppv_week(state.player.current_promotion)
+    # Fallback: every 4th week
+    return state.current_week % 4 == 0
+
+
+def _advance_week(state):
+    """Advance the game calendar by one week."""
+    state.total_weeks += 1
+    state.current_week += 1
+
+    if state.current_week > 52:
+        state.current_week = 1
+        state.current_year += 1
+
+    # Advance calendar object if present
+    if hasattr(state, 'calendar') and state.calendar:
+        result = state.calendar.advance_week()
+        if result.get("rolled_month"):
+            state.calendar.schedule_month([state.player.current_promotion])
+
+
+def _handle_contract_expiry(state):
+    """Handle contract expiration."""
+    from game.world.promotions import PROMOTIONS, get_available_promotions
+    from game.world.contracts import generate_offer
+
+    player = state.player
+    promo = PROMOTIONS.get(player.current_promotion)
+    promo_name = promo.name if promo else player.current_promotion
+
+    print_subheader("CONTRACT EXPIRED")
+    print(f"  Your contract with {promo_name} has expired.")
+
+    # Current promotion may offer renewal
+    options = []
+    if promo:
+        new_offer = generate_offer(promo, player)
+        options.append((
+            f"Re-sign with {promo_name}",
+            f"${new_offer.pay_per_show}/show, {new_offer.weeks_duration} weeks",
+        ))
+
+    # Other promotions may be interested
+    available = get_available_promotions(player)
+    available = [p for p in available if p.id != player.current_promotion][:3]
+    for ap in available:
+        offer = generate_offer(ap, player)
+        options.append((
+            f"Sign with {ap.name}",
+            f"${offer.pay_per_show}/show, {offer.weeks_duration} weeks (Tier {ap.tier})",
+        ))
+
+    options.append(("Go freelance", "No contract. Work when you want."))
+
+    choice = print_menu(options, "What do you do?")
+
+    if choice == 0 and promo:
+        # Re-sign
+        new_offer = generate_offer(promo, player)
+        state.contract = {
+            "promotion_id": promo.id,
+            "weeks_remaining": new_offer.weeks_duration,
+            "pay_per_show": new_offer.pay_per_show,
+            "exclusive": new_offer.exclusive,
+        }
+        player.money += new_offer.signing_bonus
+        print(f"\n  Re-signed with {promo_name}!")
+        if new_offer.signing_bonus:
+            print(f"  Signing bonus: ${new_offer.signing_bonus:,}")
+        state.log_career_event(f"Re-signed with {promo_name}")
+    elif choice <= len(available) and choice > 0:
+        # Sign with new promotion
+        new_promo = available[choice - 1]
+        offer = generate_offer(new_promo, player)
+        player.current_promotion = new_promo.id
+        if new_promo.id not in player.career_promotions:
+            player.career_promotions.append(new_promo.id)
+        state.contract = {
+            "promotion_id": new_promo.id,
+            "weeks_remaining": offer.weeks_duration,
+            "pay_per_show": offer.pay_per_show,
+            "exclusive": offer.exclusive,
+        }
+        player.money += offer.signing_bonus
+        print(f"\n  Signed with {new_promo.name}!")
+        if offer.signing_bonus:
+            print(f"  Signing bonus: ${offer.signing_bonus:,}")
+        state.log_career_event(f"Signed with {new_promo.name}")
+    else:
+        # Freelance
+        state.contract = {
+            "promotion_id": player.current_promotion,
+            "weeks_remaining": 12,
+            "pay_per_show": 50,
+            "exclusive": False,
+        }
+        print(f"\n  You go freelance. Working indie dates.")
+
+    press_enter()
+
+
 def check_game_over(state):
     """Check for game-over conditions."""
     player = state.player
@@ -500,7 +602,8 @@ def check_game_over(state):
         return
 
     if player.age >= 55:
-        print(f"\n  {colored('Your body can\\'t take it anymore. It\\'s time to hang up the boots.', Colors.WARNING)}")
+        _msg = "Your body can't take it anymore. It's time to hang up the boots."
+        print(f"\n  {colored(_msg, Colors.WARNING)}")
         state.game_over = True
         state.game_over_reason = "age"
         state.log_career_event("Forced to retire due to age")

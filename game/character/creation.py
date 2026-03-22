@@ -58,7 +58,8 @@ def create_character():
     print(f"  {backstory['description']}")
     print()
     print(f"  Starting Age: {bold(str(backstory['starting_age']))}")
-    print(f"  Starting Money: {colored(f'${backstory[\"starting_money\"]:,}', Colors.MONEY)}")
+    starting_money = backstory["starting_money"]
+    print(f"  Starting Money: {colored(f'${starting_money:,}', Colors.MONEY)}")
     print()
     print("  Skill Modifiers:")
     for skill, bonus in backstory["skill_bonuses"].items():

@@ -264,7 +264,8 @@ def print_game_over(wrestler, career_summary):
     print(f"  Best Match Rating: {career_summary['best_match']:.2f} stars")
     print(f"  Peak Popularity: {career_summary['peak_popularity']}")
     print(f"  Promotions Worked: {', '.join(career_summary['promotions'])}")
-    print(f"  Career Earnings: {colored(f'${career_summary[\"total_earnings\"]:,}', Colors.MONEY)}")
+    total_earnings = career_summary["total_earnings"]
+    print(f"  Career Earnings: {colored(f'${total_earnings:,}', Colors.MONEY)}")
     print()
 
     # Hall of Fame check

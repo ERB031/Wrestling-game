@@ -41,6 +41,10 @@ class GameState:
     # NPC tracking
     npc_registry: dict = field(default_factory=dict)  # {npc_id: Wrestler.to_dict()}
 
+    # Calendar and title manager (set in initialize_world)
+    calendar: object = None
+    title_manager: object = None
+
     # Game flags
     game_over: bool = False
     game_over_reason: str = ""
