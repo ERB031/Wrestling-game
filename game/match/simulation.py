@@ -19,6 +19,7 @@ from game.match.moves import (
     FINISHERS_BY_STYLE, SIGNATURES_BY_STYLE, STANDARD_MOVES,
     WEAPON_MOVES, WEAPONS_BY_VIOLENCE, CROWD_SPOTS, COUNTERS,
     NEAR_FALLS, PACING,
+    get_enriched_moves_for_phase, get_move_stat_line, enrich_move,
 )
 from game.match.match_types import MATCH_TYPES
 
@@ -144,6 +145,23 @@ def run_match(player, opponent, match_type_id, booked_to_win, state):
         apply_injury(player, injury)
         match_state["injuries_during"] += 1
 
+    # Check for concussion from accumulated head trauma during match
+    player_conc = match_state.get("player_concussion_risk", 0)
+    if player_conc >= 8 and random.random() < player_conc * 0.04:
+        from game.character.wrestler import Injury as ConcInjury
+        severity = 2 if player_conc < 15 else 3
+        conc = ConcInjury(
+            body_part="head",
+            severity=severity,
+            description="Concussion" if severity == 2 else "Severe Concussion",
+            weeks_remaining=random.randint(2, 6) if severity == 2 else random.randint(6, 14),
+            chronic=random.random() < (0.15 if severity == 2 else 0.3),
+            stat_penalties={"in_ring": 5, "psychology": 5} if severity == 2 else {"in_ring": 10, "psychology": 8, "charisma": 5},
+        )
+        apply_injury(player, conc)
+        player.body_damage["head"] = min(100, player.body_damage["head"] + severity * 5)
+        print(f"    {colored('You took too many shots to the head tonight.', Colors.INJURY)}")
+
     # XP gains
     xp_gains = get_xp_from_rating(rating)
     for skill, xp in xp_gains.items():
@@ -201,18 +219,14 @@ def choose_approach(player, match_type):
 def run_phase(player, opponent, match_type, match_state, phase, approach):
     """Run a single match phase with a player choice."""
     # Narrate the phase opening
-    if phase == "early":
-        pacing_pool = PACING.get("feeling_out", ["The match begins."])
-        print(f"\n  {random.choice(pacing_pool)}")
-    elif phase == "mid":
-        pacing_pool = PACING.get("building", ["The action intensifies."])
-        print(f"\n  {random.choice(pacing_pool)}")
-    elif phase == "mid2":
-        pacing_pool = PACING.get("heat_segment", ["The punishment continues."])
-        print(f"\n  {random.choice(pacing_pool)}")
-    elif phase == "finish":
-        pacing_pool = PACING.get("finishing_stretch", ["This is it!"])
-        print(f"\n  {random.choice(pacing_pool)}")
+    pacing_keys = {
+        "early": "feeling_out",
+        "mid": "building",
+        "mid2": "heat_segment",
+        "finish": "finishing_stretch",
+    }
+    pacing_pool = PACING.get(pacing_keys.get(phase, "building"), ["The match continues."])
+    print(f"\n  {random.choice(pacing_pool)}")
 
     # Generate choices based on phase and approach
     choices = generate_phase_choices(player, opponent, match_type, match_state, phase, approach)
@@ -220,7 +234,16 @@ def run_phase(player, opponent, match_type, match_state, phase, approach):
     if not choices:
         return
 
-    options = [(c["name"], c["description"]) for c in choices]
+    # Build menu with stat lines for move-based choices
+    options = []
+    for c in choices:
+        label = c["name"]
+        desc = c.get("description", "")
+        if c.get("move_data"):
+            stat_line = get_move_stat_line(c["move_data"])
+            desc = f"{desc}\n       {dim(stat_line)}" if desc else dim(stat_line)
+        options.append((label, desc))
+
     choice_idx = print_menu(options, "What do you do?")
     chosen = choices[choice_idx]
 
@@ -229,11 +252,19 @@ def run_phase(player, opponent, match_type, match_state, phase, approach):
 
 
 def generate_phase_choices(player, opponent, match_type, match_state, phase, approach):
-    """Generate contextual choices for a match phase."""
+    """Generate contextual choices for a match phase.
+
+    Each choice now includes a 'move_data' dict with visible stats:
+    violence, danger, concussion_risk, fan_interest.
+    """
     choices = []
     style = player.style_id or "hybrid"
 
+    # Get enriched moves for this phase
+    move_picks = get_enriched_moves_for_phase(style, match_type, phase)
+
     if phase == "early":
+        # Always offer strategic non-move options first
         choices.append({
             "name": "Wrestling clinic",
             "description": "Lock up and work holds. Show your technical ability.",
@@ -241,15 +272,7 @@ def generate_phase_choices(player, opponent, match_type, match_state, phase, app
             "quality_bonus": 0.5,
             "risk": 0.1,
             "momentum_bonus": 1,
-        })
-        choices.append({
-            "name": "Aggressive start",
-            "description": "Attack before the bell. Set the tone early.",
-            "skill_check": "violence",
-            "quality_bonus": 0.4,
-            "risk": 0.15,
-            "momentum_bonus": 2,
-            "alignment_shift": -3,
+            "move_data": None,
         })
         choices.append({
             "name": "Feel them out",
@@ -258,22 +281,31 @@ def generate_phase_choices(player, opponent, match_type, match_state, phase, app
             "quality_bonus": 0.6,
             "risk": 0.05,
             "momentum_bonus": 0,
+            "move_data": None,
+        })
+
+        # Offer specific early-match moves with stats
+        for mv in move_picks[:2]:
+            choices.append(_move_to_choice(mv, phase))
+
+        # Aggressive start is always an option
+        choices.append({
+            "name": "Aggressive start",
+            "description": "Attack before the bell. Set the tone early.",
+            "skill_check": "violence",
+            "quality_bonus": 0.4,
+            "risk": 0.15,
+            "momentum_bonus": 2,
+            "alignment_shift": -3,
+            "move_data": None,
         })
 
     elif phase in ("mid", "mid2"):
-        # Signature move
-        sigs = SIGNATURES_BY_STYLE.get(style, SIGNATURES_BY_STYLE.get("hybrid", []))
-        if sigs:
-            sig = random.choice(sigs)
-            choices.append({
-                "name": f"Hit the {sig[0]}",
-                "description": f"Go for your signature move.",
-                "skill_check": "in_ring",
-                "quality_bonus": 0.6,
-                "risk": sig[4],
-                "momentum_bonus": 2,
-            })
+        # Offer specific moves with full stat display
+        for mv in move_picks:
+            choices.append(_move_to_choice(mv, phase))
 
+        # Always offer these strategic options too
         choices.append({
             "name": "Work a body part",
             "description": "Target a specific area to set up your finisher.",
@@ -281,43 +313,8 @@ def generate_phase_choices(player, opponent, match_type, match_state, phase, app
             "quality_bonus": 0.7,
             "risk": 0.05,
             "momentum_bonus": 1,
+            "move_data": None,
         })
-
-        # Weapon spot if allowed
-        if match_type.get("allow_weapons") or match_type.get("no_dq"):
-            violence_req = match_type.get("violence_requirement", 0)
-            available_weapons = []
-            for threshold in sorted(WEAPONS_BY_VIOLENCE.keys()):
-                if threshold <= violence_req:
-                    available_weapons = WEAPONS_BY_VIOLENCE[threshold]
-            if available_weapons:
-                weapon = random.choice(available_weapons)
-                weapon_moves = WEAPON_MOVES.get(weapon, [])
-                if weapon_moves:
-                    wm = random.choice(weapon_moves)
-                    choices.append({
-                        "name": f"Grab the {weapon.replace('_', ' ')}",
-                        "description": f"Use a {weapon.replace('_', ' ')} - {wm[0]}.",
-                        "skill_check": "violence",
-                        "quality_bonus": 0.5,
-                        "risk": wm[4],
-                        "momentum_bonus": 3,
-                        "alignment_shift": -5,
-                        "is_weapon": True,
-                    })
-
-        # Dive to the outside
-        choices.append({
-            "name": "High-risk dive",
-            "description": "Launch yourself to the outside. The crowd will go wild.",
-            "skill_check": "athleticism",
-            "quality_bonus": 0.7,
-            "risk": 0.25,
-            "momentum_bonus": 3,
-            "is_high_risk": True,
-        })
-
-        # Taunt
         choices.append({
             "name": "Taunt the crowd",
             "description": "Work the audience. Build the atmosphere.",
@@ -325,23 +322,31 @@ def generate_phase_choices(player, opponent, match_type, match_state, phase, app
             "quality_bonus": 0.4,
             "risk": 0.0,
             "momentum_bonus": 1,
+            "move_data": None,
         })
 
     elif phase == "finish":
-        # Finisher attempt
-        finishers = FINISHERS_BY_STYLE.get(style, FINISHERS_BY_STYLE.get("hybrid", []))
-        if finishers:
-            fin = random.choice(finishers)
-            choices.append({
-                "name": f"Go for the {player.finisher_name or fin[0]}",
-                "description": "Hit your finisher! End this!",
-                "skill_check": "in_ring",
-                "quality_bonus": 0.8,
-                "risk": fin[4],
-                "momentum_bonus": 4,
-                "is_finisher": True,
-            })
+        # Offer finisher picks with stats
+        for mv in move_picks:
+            c = _move_to_choice(mv, phase)
+            if mv["tier"] == "finisher":
+                c["is_finisher"] = True
+                # Use player's custom finisher name if it matches
+                if player.finisher_name:
+                    c["name"] = f"Go for the {player.finisher_name}"
+                    c["move_data"]["name"] = player.finisher_name
+                    break  # Only relabel the first finisher
+            choices.append(c)
 
+        # Re-add any finishers that didn't get added
+        for mv in move_picks:
+            if not any(c.get("move_data") and c["move_data"]["name"] == mv["name"] for c in choices):
+                c = _move_to_choice(mv, phase)
+                if mv["tier"] == "finisher":
+                    c["is_finisher"] = True
+                choices.append(c)
+
+        # Always offer dramatic sequence and last stand
         choices.append({
             "name": "Dramatic near-fall sequence",
             "description": "Trade big moves. Kickouts. Build the drama.",
@@ -350,8 +355,8 @@ def generate_phase_choices(player, opponent, match_type, match_state, phase, app
             "risk": 0.15,
             "momentum_bonus": 2,
             "is_drama": True,
+            "move_data": None,
         })
-
         choices.append({
             "name": "Desperate last stand",
             "description": "Dig deep. Fighting spirit. Leave it all out there.",
@@ -359,6 +364,7 @@ def generate_phase_choices(player, opponent, match_type, match_state, phase, app
             "quality_bonus": 0.6,
             "risk": 0.2,
             "momentum_bonus": 3,
+            "move_data": None,
         })
 
         if match_type.get("allow_blade"):
@@ -371,9 +377,68 @@ def generate_phase_choices(player, opponent, match_type, match_state, phase, app
                 "momentum_bonus": 2,
                 "is_blade": True,
                 "alignment_shift": -3,
+                "move_data": None,
             })
 
     return choices
+
+
+def _move_to_choice(move_data, phase):
+    """Convert an enriched move dict into a match choice dict."""
+    mv = move_data
+    tier = mv["tier"]
+
+    # Determine skill check from move type
+    skill_map = {
+        "strike": "violence",
+        "power": "power",
+        "aerial": "athleticism",
+        "submission": "in_ring",
+        "weapon": "violence",
+        "dirty": "psychology",
+        "taunt": "charisma",
+    }
+    skill_check = skill_map.get(mv["move_type"], "in_ring")
+
+    # Quality bonus scales with tier
+    quality_map = {"standard": 0.4, "signature": 0.6, "finisher": 0.85, "weapon": 0.55}
+    quality = quality_map.get(tier, 0.5)
+
+    # Momentum from fan interest
+    momentum = max(1, mv["fan_interest"] // 3)
+
+    # Tier label for display
+    tier_labels = {"standard": "", "signature": "[SIG] ", "finisher": "[FIN] ", "weapon": "[WPN] "}
+    prefix = tier_labels.get(tier, "")
+
+    # Description based on move type
+    type_descs = {
+        "strike": "A devastating strike.",
+        "power": "Raw power on display.",
+        "aerial": "High-flying offense.",
+        "submission": "Lock in the hold.",
+        "weapon": "Bring the violence.",
+        "dirty": "Bend the rules.",
+    }
+    desc = type_descs.get(mv["move_type"], "Execute the move.")
+
+    choice = {
+        "name": f"{prefix}{mv['name']}",
+        "description": desc,
+        "skill_check": skill_check,
+        "quality_bonus": quality,
+        "risk": mv["injury_risk"],
+        "momentum_bonus": momentum,
+        "move_data": mv,
+        "is_high_risk": mv["danger"] >= 7,
+        "is_weapon": tier == "weapon",
+    }
+
+    # Weapon/dirty moves shift alignment
+    if mv["move_type"] in ("weapon", "dirty"):
+        choice["alignment_shift"] = -5
+
+    return choice
 
 
 def resolve_choice(player, opponent, match_type, match_state, choice, phase):
@@ -385,7 +450,7 @@ def resolve_choice(player, opponent, match_type, match_state, choice, phase):
     roll = random.randint(1, 100)
     success = roll <= (skill_value + 20)  # Generous threshold
 
-    # Check for botch
+    # Check for botch - high danger moves are harder
     is_high_risk = choice.get("is_high_risk", False)
     is_fatigued = phase == "finish"
     botched = did_botch(player, is_high_risk=is_high_risk, is_fatigued=is_fatigued)
@@ -401,6 +466,21 @@ def resolve_choice(player, opponent, match_type, match_state, choice, phase):
         "success": success and not botched,
     })
 
+    # Track concussion risk from move data
+    move_data = choice.get("move_data")
+    if move_data:
+        concussion = move_data.get("concussion_risk", 0)
+        match_state.setdefault("concussion_accumulator", 0)
+        if success:
+            # Opponent takes the concussion risk on successful moves
+            match_state["concussion_accumulator"] += concussion
+        else:
+            # Botched moves can hurt the performer instead
+            if botched and concussion >= 5:
+                match_state["concussion_accumulator"] += concussion // 2
+                match_state.setdefault("player_concussion_risk", 0)
+                match_state["player_concussion_risk"] += concussion
+
     # Narrate outcome
     if success and not botched:
         narrate_success(player, opponent, choice, phase)
@@ -409,7 +489,6 @@ def resolve_choice(player, opponent, match_type, match_state, choice, phase):
         if choice.get("is_drama"):
             match_state["near_falls"] += random.randint(1, 3)
             match_state["dramatic_moments"] += 1
-            # Show near fall text
             print(f"    {colored(random.choice(NEAR_FALLS), Colors.GOLD)}")
 
         if choice.get("is_finisher"):
@@ -422,6 +501,22 @@ def resolve_choice(player, opponent, match_type, match_state, choice, phase):
 
         if choice.get("is_weapon"):
             match_state["dramatic_moments"] += 1
+
+        # High fan-interest moves get crowd reactions
+        if move_data and move_data.get("fan_interest", 0) >= 7:
+            if player.alignment > 0:
+                print_crowd_reaction("pop", 2)
+            else:
+                print_crowd_reaction("heat", 2)
+        elif choice.get("momentum_bonus", 0) >= 3 and not move_data:
+            if player.alignment > 0:
+                print_crowd_reaction("pop", 2)
+            else:
+                print_crowd_reaction("heat", 2)
+
+        # Warn about concussion-heavy moves
+        if move_data and move_data.get("concussion_risk", 0) >= 7 and success:
+            print(f"    {dim('A sickening impact to the head. That one was dangerous.')}")
     else:
         narrate_failure(player, opponent, choice, phase, botched)
         match_state["momentum"] -= 1
@@ -438,8 +533,10 @@ def resolve_choice(player, opponent, match_type, match_state, choice, phase):
 def narrate_success(player, opponent, choice, phase):
     """Print success narration for a choice."""
     name = choice["name"]
+    move_data = choice.get("move_data")
     print(f"\n  {colored('>>>', Colors.GREEN)} {bold(name)}")
 
+    # Static flavor texts for strategic (non-move) choices
     flavor_texts = {
         "Wrestling clinic": f"  {player.ring_name} takes control with crisp chain wrestling. {opponent.ring_name} can't find an answer.",
         "Aggressive start": f"  {player.ring_name} attacks before the bell! {opponent.ring_name} is caught off guard!",
@@ -451,32 +548,95 @@ def narrate_success(player, opponent, choice, phase):
         "Desperate last stand": f"  {player.ring_name} digs deep! Where is this energy coming from?!",
     }
 
-    text = flavor_texts.get(name, f"  {player.ring_name} connects! {choice.get('description', '')}")
-    print(text)
+    # Check static texts first (strip tier prefixes for matching)
+    clean_name = name.replace("[SIG] ", "").replace("[FIN] ", "").replace("[WPN] ", "")
+    text = flavor_texts.get(clean_name)
 
-    # Crowd reaction
-    if choice.get("momentum_bonus", 0) >= 3:
-        if player.alignment > 0:
-            print_crowd_reaction("pop", 2)
+    if text is None and move_data:
+        # Generate narration from move data
+        move_name = move_data["name"]
+        move_type = move_data["move_type"]
+        fan = move_data.get("fan_interest", 5)
+
+        if move_type == "aerial":
+            texts = [
+                f"  {player.ring_name} flies through the air with the {move_name}! CONNECTS!",
+                f"  OFF THE TOP ROPE! {player.ring_name} hits the {move_name}! The crowd erupts!",
+                f"  {player.ring_name} soars with a beautiful {move_name}!",
+            ]
+        elif move_type == "power":
+            texts = [
+                f"  {player.ring_name} PLANTS {opponent.ring_name} with the {move_name}!",
+                f"  The {move_name} connects! {opponent.ring_name} is folded in half!",
+                f"  RAW POWER! {player.ring_name} drives {opponent.ring_name} into the mat with the {move_name}!",
+            ]
+        elif move_type == "strike":
+            texts = [
+                f"  {player.ring_name} CRACKS {opponent.ring_name} with the {move_name}!",
+                f"  The {move_name} lands flush! {opponent.ring_name} staggers!",
+                f"  BOOM! {player.ring_name} drops {opponent.ring_name} with a vicious {move_name}!",
+            ]
+        elif move_type == "submission":
+            texts = [
+                f"  {player.ring_name} locks in the {move_name}! {opponent.ring_name} is trapped!",
+                f"  The {move_name} is cinched in tight! Nowhere to go!",
+                f"  {player.ring_name} wrenches on the {move_name}! {opponent.ring_name} is screaming!",
+            ]
+        elif move_type == "weapon":
+            texts = [
+                f"  {player.ring_name} SMASHES {opponent.ring_name} with the {move_name}!",
+                f"  SICKENING IMPACT! The {move_name} echoes through the arena!",
+                f"  {opponent.ring_name} crumbles after the {move_name}! That was BRUTAL!",
+            ]
+        elif move_type == "dirty":
+            texts = [
+                f"  {player.ring_name} hits the {move_name} while the ref isn't looking!",
+                f"  That underhanded {move_name} from {player.ring_name}! The crowd boos!",
+            ]
         else:
-            print_crowd_reaction("heat", 2)
+            texts = [f"  {player.ring_name} connects with the {move_name}!"]
+
+        text = random.choice(texts)
+
+        # Add spectacle commentary for high fan-interest moves
+        if fan >= 8:
+            text += f"\n    {colored('The crowd is going absolutely INSANE!', Colors.GOLD)}"
+        elif fan >= 6:
+            text += f"\n    {dim('The crowd pops big for that one.')}"
+
+    elif text is None:
+        text = f"  {player.ring_name} connects! {choice.get('description', '')}"
+
+    print(text)
 
 
 def narrate_failure(player, opponent, choice, phase, botched):
     """Print failure narration."""
     name = choice["name"]
+    move_data = choice.get("move_data")
+    move_name = move_data["name"] if move_data else name
     print(f"\n  {colored('<<<', Colors.RED)} {bold(name)}")
 
     if botched:
-        botch_texts = [
-            f"  {player.ring_name} goes for it but slips! An ugly botch!",
-            f"  Miscommunication! {player.ring_name} and {opponent.ring_name} collide awkwardly.",
-            f"  {player.ring_name} mistimes the move completely. The crowd goes quiet.",
-        ]
+        if move_data and move_data.get("danger", 0) >= 7:
+            botch_texts = [
+                f"  {player.ring_name} goes for the {move_name} but LANDS HORRIBLY! That could be serious!",
+                f"  The {move_name} goes wrong! {player.ring_name} crashes and burns!",
+                f"  BOTCH on the {move_name}! Both wrestlers are down! The medical team looks concerned.",
+            ]
+        else:
+            botch_texts = [
+                f"  {player.ring_name} goes for the {move_name} but slips! An ugly botch!",
+                f"  Miscommunication on the {move_name}! {player.ring_name} and {opponent.ring_name} collide awkwardly.",
+                f"  {player.ring_name} mistimes the {move_name} completely. The crowd goes quiet.",
+            ]
         print(random.choice(botch_texts))
     else:
         counter_text = random.choice(COUNTERS)
-        print(f"  {opponent.ring_name} {counter_text}!")
+        if move_data:
+            print(f"  {player.ring_name} goes for the {move_name} but {opponent.ring_name} {counter_text}!")
+        else:
+            print(f"  {opponent.ring_name} {counter_text}!")
         if choice.get("momentum_bonus", 0) >= 3:
             print_crowd_reaction("gasp", 1)
 

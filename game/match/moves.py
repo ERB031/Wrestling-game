@@ -369,3 +369,190 @@ def get_available_weapons(violence_level):
 def get_weapon_moves(weapon_id):
     """Return the move list for a specific weapon."""
     return WEAPON_MOVES.get(weapon_id, [])
+
+
+# -----------------------------------------------------------------------
+# Move stat enrichment - derives visible stats from move tuples
+# -----------------------------------------------------------------------
+
+# Move types that target the head (higher concussion risk)
+_HEAD_TARGETING_TYPES = {"strike", "aerial", "weapon"}
+_HEAD_TARGETING_NAMES = {
+    "headbutt", "head", "skull", "brain", "concuss", "curb stomp",
+    "punt kick", "gts", "go to sleep", "ddt", "piledriver",
+    "con-chair-to", "chair shot to the head", "cutter", "rko",
+    "codebreaker", "stunner", "superkick", "sweet chin music",
+    "enzuigiri", "kinshasa", "bomaye", "kamigoye", "jawbreaker",
+    "brainbuster", "steiner screwdriver", "ganso bomb", "tombstone",
+    "burning hammer", "package piledriver", "tiger driver",
+    "canadian destroyer", "paradigm shift", "backdrop driver",
+}
+
+
+def _name_targets_head(name):
+    """Check if a move name suggests it targets the head."""
+    lower = name.lower()
+    return any(keyword in lower for keyword in _HEAD_TARGETING_NAMES)
+
+
+def enrich_move(move_tuple, tier="signature"):
+    """Convert a move tuple into a rich dict with visible stats.
+
+    Parameters
+    ----------
+    move_tuple : tuple
+        (name, move_type, damage, spectacle, injury_risk)
+    tier : str
+        "standard", "signature", "finisher", or "weapon"
+
+    Returns
+    -------
+    dict with keys: name, move_type, damage, spectacle, injury_risk,
+         violence, danger, concussion_risk, fan_interest, tier
+    """
+    name, move_type, damage, spectacle, injury_risk = move_tuple
+
+    # Violence (0-10): derived from damage and move type
+    violence = min(10, int(damage / 10))
+    if move_type in ("weapon", "dirty"):
+        violence = min(10, violence + 2)
+    if move_type == "submission":
+        violence = max(1, violence - 1)
+
+    # Danger (0-10): derived from injury_risk
+    danger = min(10, int(injury_risk * 25))  # 0.40 risk -> 10 danger
+    if tier == "finisher":
+        danger = min(10, danger + 1)
+
+    # Concussion risk (0-10): based on head targeting + move type
+    concussion_base = 1
+    if _name_targets_head(name):
+        concussion_base += 5
+    if move_type == "strike":
+        concussion_base += 1
+    if move_type == "aerial":
+        concussion_base += 1  # Landing risk
+    if move_type == "weapon":
+        concussion_base += 2
+    # Scale by injury risk
+    concussion_risk = min(10, int(concussion_base + injury_risk * 8))
+
+    # Fan interest (0-10): derived from spectacle
+    fan_interest = min(10, int(spectacle / 10))
+    if tier == "finisher":
+        fan_interest = min(10, fan_interest + 1)
+
+    return {
+        "name": name,
+        "move_type": move_type,
+        "damage": damage,
+        "spectacle": spectacle,
+        "injury_risk": injury_risk,
+        "violence": violence,
+        "danger": danger,
+        "concussion_risk": concussion_risk,
+        "fan_interest": fan_interest,
+        "tier": tier,
+    }
+
+
+def get_move_stat_line(move_dict):
+    """Format a compact stat line for display under a move option.
+
+    Returns a string like:
+    'Violence: ████░░░░░░ 4  Danger: ██░░░░░░░░ 2  Concussion: █░░░░░░░░░ 1  Fan Interest: ████████░░ 8'
+    """
+    def bar(value, max_val=10, width=5):
+        filled = int(value / max_val * width)
+        empty = width - filled
+        return "█" * filled + "░" * empty
+
+    v = move_dict["violence"]
+    d = move_dict["danger"]
+    c = move_dict["concussion_risk"]
+    f = move_dict["fan_interest"]
+
+    return (
+        f"VIO {bar(v)}{v:>2}  "
+        f"DNG {bar(d)}{d:>2}  "
+        f"CNC {bar(c)}{c:>2}  "
+        f"FAN {bar(f)}{f:>2}"
+    )
+
+
+def get_enriched_moves_for_phase(style_id, match_type, phase, count=3):
+    """Get a curated selection of enriched moves for a match phase.
+
+    Parameters
+    ----------
+    style_id : str
+        Player's wrestling style.
+    match_type : dict
+        Match type data from MATCH_TYPES.
+    phase : str
+        "early", "mid", "mid2", or "finish"
+    count : int
+        Number of moves to return.
+
+    Returns
+    -------
+    list[dict]
+        Enriched move dicts ready for display.
+    """
+    import random as _rand
+
+    moves = []
+
+    if phase == "early":
+        # Mix of standard grapples and style signatures (safer moves)
+        standards = list(STANDARD_MOVES.get("grapples", []))
+        standards += list(STANDARD_MOVES.get("strikes", []))
+        _rand.shuffle(standards)
+        for m in standards[:2]:
+            moves.append(enrich_move(m, "standard"))
+        # One signature if available
+        sigs = SIGNATURES_BY_STYLE.get(style_id, SIGNATURES_BY_STYLE.get("hybrid", []))
+        if sigs:
+            safe_sigs = [s for s in sigs if s[4] < 0.15]  # Lower risk
+            if safe_sigs:
+                moves.append(enrich_move(_rand.choice(safe_sigs), "signature"))
+
+    elif phase in ("mid", "mid2"):
+        # Signatures are the main picks here
+        sigs = list(SIGNATURES_BY_STYLE.get(style_id, SIGNATURES_BY_STYLE.get("hybrid", [])))
+        _rand.shuffle(sigs)
+        for s in sigs[:2]:
+            moves.append(enrich_move(s, "signature"))
+        # Add one high-risk standard aerial or strike
+        aerials = list(STANDARD_MOVES.get("aerial", []))
+        if aerials:
+            moves.append(enrich_move(_rand.choice(aerials), "standard"))
+        # Weapon move if match allows
+        if match_type.get("allow_weapons") or match_type.get("no_dq"):
+            violence_req = match_type.get("violence_requirement", 0)
+            weapons = get_available_weapons(violence_req)
+            if weapons:
+                weapon_id = _rand.choice(weapons)
+                wmoves = get_weapon_moves(weapon_id)
+                if wmoves:
+                    moves.append(enrich_move(_rand.choice(wmoves), "weapon"))
+        # Dirty move option
+        dirty = list(STANDARD_MOVES.get("dirty", []))
+        if dirty:
+            moves.append(enrich_move(_rand.choice(dirty), "standard"))
+
+    elif phase == "finish":
+        # Finishers are the star picks
+        fins = list(FINISHERS_BY_STYLE.get(style_id, FINISHERS_BY_STYLE.get("hybrid", [])))
+        _rand.shuffle(fins)
+        for f in fins[:2]:
+            moves.append(enrich_move(f, "finisher"))
+        # One devastating signature
+        sigs = list(SIGNATURES_BY_STYLE.get(style_id, SIGNATURES_BY_STYLE.get("hybrid", [])))
+        heavy_sigs = [s for s in sigs if s[2] >= 55]  # High damage
+        if heavy_sigs:
+            moves.append(enrich_move(_rand.choice(heavy_sigs), "signature"))
+
+    # Ensure we have at least `count` and no more than count + 2
+    _rand.shuffle(moves)
+    return moves[:min(len(moves), count + 2)]
