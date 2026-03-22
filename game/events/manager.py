@@ -89,6 +89,76 @@ EVENTS = [
         "cooldown": 52,
         "handler": "_handle_death_of_friend",
     },
+    {
+        "id": "old_rival_calls",
+        "name": "Blast From the Past",
+        "weight": 7,
+        "condition": lambda p, s: len(s.storyline_history) > 0,
+        "cooldown": 16,
+        "handler": "_handle_old_rival_calls",
+    },
+    {
+        "id": "promotion_folds",
+        "name": "Promotion Goes Under",
+        "weight": 3,
+        "condition": lambda p, s: s.total_weeks > 30,
+        "cooldown": 52,
+        "handler": "_handle_promotion_folds",
+    },
+    {
+        "id": "scandal",
+        "name": "Scandal",
+        "weight": 4,
+        "condition": lambda p, s: p.popularity >= 25,
+        "cooldown": 20,
+        "handler": "_handle_scandal",
+    },
+    {
+        "id": "mentor_offer",
+        "name": "Veteran's Wisdom",
+        "weight": 6,
+        "condition": lambda p, s: s.total_weeks > 10 and p.get_overall_rating() < 50,
+        "cooldown": 16,
+        "handler": "_handle_mentor_offer",
+    },
+    {
+        "id": "big_show_tryout",
+        "name": "Tryout Match",
+        "weight": 5,
+        "condition": lambda p, s: p.popularity >= 20 and s.total_weeks > 20,
+        "cooldown": 20,
+        "handler": "_handle_big_show_tryout",
+    },
+    {
+        "id": "tag_team_offer",
+        "name": "Tag Team Opportunity",
+        "weight": 6,
+        "cooldown": 16,
+        "handler": "_handle_tag_team_offer",
+    },
+    {
+        "id": "dui_arrest",
+        "name": "DUI",
+        "weight": 3,
+        "condition": lambda p, s: p.alcohol_level > 50,
+        "cooldown": 52,
+        "handler": "_handle_dui_arrest",
+    },
+    {
+        "id": "charity_event",
+        "name": "Charity Event",
+        "weight": 6,
+        "cooldown": 12,
+        "handler": "_handle_charity_event",
+    },
+    {
+        "id": "social_media_viral",
+        "name": "Going Viral",
+        "weight": 7,
+        "condition": lambda p, s: p.popularity >= 15,
+        "cooldown": 12,
+        "handler": "_handle_social_media_viral",
+    },
 ]
 
 
@@ -558,3 +628,305 @@ def _handle_death_of_friend(state):
         print(f"\n  {dim(_msg)}")
 
     state.log_career_event(f"Mourned the death of {name}")
+
+
+def _handle_old_rival_calls(state):
+    player = state.player
+    print_subheader("BLAST FROM THE PAST")
+
+    if state.storyline_history:
+        past = random.choice(state.storyline_history)
+        rival_name = past["name"].split("vs.")[-1].strip().split(":")[0].strip() if "vs." in past["name"] else "an old rival"
+    else:
+        rival_name = "an old rival"
+
+    print(f"  Your phone rings. It's {rival_name}.")
+    print(f'  "Hey, I know we had our differences, but I think the fans')
+    print(f'   would love to see us go at it one more time."')
+
+    options = [
+        ("Agree to a rematch angle", "The money is too good to pass up"),
+        ("Decline", "That chapter is closed"),
+        ("Suggest a tag team instead", "Better together than apart"),
+    ]
+    choice = print_menu(options, "What do you do?")
+
+    if choice == 0:
+        print(f"\n  You agree. The wheels are in motion for a comeback feud.")
+        player.popularity += 5
+        player.momentum = min(10, player.momentum + 2)
+        state.log_career_event(f"Agreed to revisit rivalry with {rival_name}")
+    elif choice == 1:
+        print(f"\n  {dim('You hang up. Some things are better left in the past.')}")
+    elif choice == 2:
+        print(f"\n  The idea gets a positive response. This could be something special.")
+        player.popularity += 3
+        player.backstage_rep += 5
+        state.log_career_event(f"Formed alliance with former rival {rival_name}")
+
+
+def _handle_promotion_folds(state):
+    player = state.player
+    print_subheader("PROMOTION GOES UNDER")
+
+    # Pick a random other promotion
+    from game.world.promotions import PROMOTIONS
+    other_promos = [p for pid, p in PROMOTIONS.items()
+                    if pid != player.current_promotion and pid != "retirement" and p.tier <= 2]
+
+    if not other_promos:
+        print("  You hear rumors of a small promotion shutting down.")
+        print(f"  {dim('The business is tough.')}")
+        return
+
+    folded = random.choice(other_promos)
+    print(f"  {colored(f'{folded.name} has closed its doors.', Colors.RED)}")
+    print(f"  Another promotion bites the dust.")
+    print(f"  Their wrestlers are looking for work.")
+
+    options = [
+        ("Reach out to their talent", "Help some guys find work at your promotion"),
+        ("Mind your own business", "Not your problem"),
+    ]
+    choice = print_menu(options, "What do you do?")
+
+    if choice == 0:
+        player.backstage_rep += 8
+        print(f"\n  You make some calls. A few of their guys get tryouts.")
+        print(f"  {colored('Backstage rep +8', Colors.GREEN)}")
+        state.log_career_event(f"Helped displaced wrestlers after {folded.name} closed")
+    else:
+        print(f"\n  {dim('You keep your head down.')}")
+
+
+def _handle_scandal(state):
+    player = state.player
+    print_subheader("SCANDAL")
+
+    scandals = [
+        ("assault allegations", "Someone claims you got physical outside the ring."),
+        ("leaked photos", "Private photos of you have surfaced online."),
+        ("controversial interview", "Something you said in a podcast is making headlines."),
+        ("backstage altercation", "Video of you in a backstage argument has leaked."),
+    ]
+    scandal_type, description = random.choice(scandals)
+    print(f"  {description}")
+    print(f"  The {scandal_type} story is blowing up on social media.")
+
+    options = [
+        ("Issue an apology", "Get ahead of it"),
+        ("Double down", "Never apologize"),
+        ("No comment", "Let it blow over"),
+    ]
+    choice = print_menu(options, "How do you respond?")
+
+    if choice == 0:
+        print(f"\n  You issue a public apology. Most people accept it.")
+        player.popularity -= 2
+        player.backstage_rep += 5
+    elif choice == 1:
+        if player.alignment < -20:
+            print(f"\n  The heel energy is strong. The controversy makes you hotter.")
+            player.popularity += 5
+            player.alignment -= 10
+        else:
+            print(f"\n  {colored('This backfires badly. Sponsors are not happy.', Colors.RED)}")
+            player.popularity -= 8
+            player.backstage_rep -= 10
+    elif choice == 2:
+        print(f"\n  {dim('You say nothing. The story eventually fades.')}")
+        player.popularity -= 3
+
+    state.log_career_event(f"Embroiled in scandal: {scandal_type}")
+
+
+def _handle_mentor_offer(state):
+    player = state.player
+    print_subheader("VETERAN'S WISDOM")
+
+    roster = state.get_current_roster()
+    if roster:
+        mentor = max(roster, key=lambda w: w.get_overall_rating())
+        mentor_name = mentor.ring_name
+    else:
+        mentor_name = "A grizzled veteran"
+
+    print(f"  {mentor_name} pulls you aside after the show.")
+    print(f'  "Kid, you\'ve got something. But you need to work on some things."')
+    print(f'  "Let me show you a few things."')
+
+    options = [
+        ("Accept the mentorship", "Learn from the best"),
+        ("Politely decline", "You'll figure it out yourself"),
+        ("Ask them about the business", "Pick their brain for stories"),
+    ]
+    choice = print_menu(options, "What do you do?")
+
+    if choice == 0:
+        from data.constants import SKILLS, SKILL_DISPLAY_NAMES
+        # Boost two random skills
+        skills_to_train = random.sample(SKILLS, 2)
+        for skill in skills_to_train:
+            xp = random.randint(15, 30)
+            leveled = player.add_skill_xp(skill, xp)
+            name = SKILL_DISPLAY_NAMES[skill]
+            print(f"  {name} +{xp} XP" + (" - LEVEL UP!" if leveled else ""))
+        player.backstage_rep += 5
+        if roster:
+            player.relationships[mentor.npc_id] = player.relationships.get(mentor.npc_id, 0) + 15
+    elif choice == 1:
+        print(f"\n  {dim('You thank them but go your own way.')}")
+    elif choice == 2:
+        print(f"\n  They share road stories late into the night.")
+        print(f"  You learn about the politics, the history, the unwritten rules.")
+        player.add_skill_xp("psychology", random.randint(10, 20))
+        player.burnout = max(0, player.burnout - 5)
+
+
+def _handle_big_show_tryout(state):
+    player = state.player
+    print_subheader("TRYOUT MATCH")
+
+    from game.world.promotions import PROMOTIONS
+    bigger_promos = [p for pid, p in PROMOTIONS.items()
+                     if p.tier > PROMOTIONS.get(player.current_promotion, PROMOTIONS.get("backyard")).tier
+                     and pid != "retirement"]
+
+    if not bigger_promos:
+        print("  A talent scout was in the crowd tonight.")
+        print(f"  {dim('They liked what they saw. Keep it up.')}")
+        player.momentum = min(10, player.momentum + 1)
+        return
+
+    target = random.choice(bigger_promos)
+    print(f"  {colored(target.name, Colors.CYAN)} has scouts in the building tonight!")
+    print(f"  This is your chance to impress.")
+    print(f"  If you put on a great match tonight, they might come calling.")
+
+    player.momentum = min(10, player.momentum + 2)
+    state.log_career_event(f"Performed in front of {target.name} scouts")
+
+
+def _handle_tag_team_offer(state):
+    player = state.player
+    print_subheader("TAG TEAM OPPORTUNITY")
+
+    roster = state.get_current_roster()
+    if not roster:
+        return
+
+    partner = random.choice(roster)
+    print(f"  {partner.ring_name} approaches you backstage.")
+    print(f'  "Hey, I think we\'d make a great tag team.')
+    print(f'   The booker is looking for a new team. What do you say?"')
+
+    options = [
+        ("Form the team", "Could be a great opportunity"),
+        ("Decline", "You're a singles wrestler"),
+    ]
+    choice = print_menu(options, "What do you do?")
+
+    if choice == 0:
+        print(f"\n  {colored(f'You and {partner.ring_name} are now a tag team!', Colors.GREEN)}")
+        player.popularity += 3
+        player.backstage_rep += 5
+        player.relationships[partner.npc_id] = player.relationships.get(partner.npc_id, 0) + 20
+        state.log_career_event(f"Formed tag team with {partner.ring_name}")
+    else:
+        print(f"\n  {dim('You decline. Singles competition is your path.')}")
+        player.relationships[partner.npc_id] = player.relationships.get(partner.npc_id, 0) - 5
+
+
+def _handle_dui_arrest(state):
+    player = state.player
+    print_subheader("DUI")
+
+    print(f"  {colored('Flashing lights in your rearview mirror.', Colors.RED)}")
+    print(f"  You've been pulled over. You've had way too much to drink.")
+    print(f"  The officer smells it immediately.")
+
+    print(f"\n  {colored('You are arrested for driving under the influence.', Colors.RED)}")
+    print(f"  This makes the local news.")
+
+    player.backstage_rep -= 20
+    player.popularity -= 5
+    player.money -= 2000  # Legal fees
+    player.alignment -= 10
+    print(f"\n  Backstage rep -20 | Popularity -5 | -$2,000 in legal fees")
+
+    from game.world.promotions import PROMOTIONS
+    promo = PROMOTIONS.get(player.current_promotion)
+    if promo and promo.tier >= 3:
+        print(f"\n  {colored('Management is furious. You are suspended for 2 weeks.', Colors.WARNING)}")
+        from game.character.wrestler import Injury
+        player.injuries.append(Injury(
+            body_part="head", severity=1,
+            description="DUI Suspension", weeks_remaining=2,
+        ))
+
+    state.log_career_event("Arrested for DUI")
+
+
+def _handle_charity_event(state):
+    player = state.player
+    print_subheader("CHARITY EVENT")
+
+    print("  The promotion is running a charity event this weekend.")
+    print("  They're asking talent to volunteer their time.")
+
+    options = [
+        ("Volunteer enthusiastically", "Go above and beyond"),
+        ("Show up but phone it in", "Do the minimum"),
+        ("Skip it", "You have better things to do"),
+    ]
+    choice = print_menu(options, "What do you do?")
+
+    if choice == 0:
+        print(f"\n  You spend the day signing autographs, meeting fans, and raising money.")
+        print(f"  The promotion takes notice of your attitude.")
+        player.popularity += 5
+        player.backstage_rep += 8
+        player.alignment += 5
+        player.burnout += 3
+    elif choice == 1:
+        print(f"\n  You show up, do your part, and leave.")
+        player.backstage_rep += 2
+    elif choice == 2:
+        print(f"\n  {dim('You skip it. Nobody says anything... but they notice.')}")
+        player.backstage_rep -= 5
+
+
+def _handle_social_media_viral(state):
+    player = state.player
+    print_subheader("GOING VIRAL")
+
+    scenarios = [
+        ("Your promo clip from last week is trending online.", "promo"),
+        ("A fan's video of your entrance has gone viral.", "entrance"),
+        ("Your post-match celebration GIF is everywhere.", "celebration"),
+        ("A wrestling journalist wrote a glowing profile about you.", "profile"),
+    ]
+    description, scenario_type = random.choice(scenarios)
+    print(f"  {description}")
+    print(f"  Your social media is blowing up.")
+
+    options = [
+        ("Engage with fans", "Reply, retweet, interact"),
+        ("Stay humble", "Thank everyone and keep working"),
+        ("Lean into the heat", "Be controversial - keep them talking"),
+    ]
+    choice = print_menu(options, "How do you handle the attention?")
+
+    if choice == 0:
+        print(f"\n  You spend hours interacting with fans. They love it.")
+        player.popularity += random.randint(5, 10)
+        player.burnout += 3
+    elif choice == 1:
+        print(f"\n  You post a simple thank you. Class act.")
+        player.popularity += random.randint(3, 6)
+        player.backstage_rep += 3
+    elif choice == 2:
+        print(f"\n  You post something deliberately provocative. It works.")
+        player.popularity += random.randint(4, 12)
+        player.alignment -= 8
+        player.backstage_rep -= 3

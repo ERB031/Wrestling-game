@@ -150,6 +150,14 @@ class GameState:
             "save_slot": self.save_slot,
         }
 
+        # Serialize calendar
+        if self.calendar:
+            data["calendar"] = self.calendar.to_dict()
+
+        # Serialize title manager
+        if self.title_manager:
+            data["title_manager"] = self.title_manager.to_dict()
+
         # Serialize NPC registry
         npc_data = {}
         for npc_id, npc in self.npc_registry.items():
@@ -210,5 +218,15 @@ class GameState:
                 if npc:
                     roster.append(npc)
             state.promotion_rosters[promo_id] = roster
+
+        # Restore calendar
+        if data.get("calendar"):
+            from game.world.calendar import Calendar
+            state.calendar = Calendar.from_dict(data["calendar"])
+
+        # Restore title manager
+        if data.get("title_manager"):
+            from game.world.titles import TitleManager
+            state.title_manager = TitleManager.from_dict(data["title_manager"])
 
         return state

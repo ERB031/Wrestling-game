@@ -86,16 +86,36 @@ def run_week(state):
 
     # Check for injuries preventing action
     if player.is_injured():
-        active = [i for i in player.injuries if i.weeks_remaining > 0 and i.severity >= 3]
-        if active:
+        severe = [i for i in player.injuries if i.weeks_remaining > 0 and i.severity >= 3]
+        moderate = [i for i in player.injuries if i.weeks_remaining > 0 and i.severity == 2]
+        if severe:
             print(f"\n  {colored('You are currently injured and cannot wrestle.', Colors.INJURY)}")
-            for inj in active:
+            for inj in severe:
                 print(f"    - {inj.description}: {inj.weeks_remaining} weeks remaining")
+        elif moderate:
+            print(f"\n  {colored('You are hurt. These injuries are nagging:', Colors.WARNING)}")
+            for inj in moderate:
+                print(f"    - {inj.description}: {inj.weeks_remaining} weeks remaining")
+            print()
+            work_injured = confirm("Do you want to work through the pain?")
+            if work_injured:
+                print(f"  {dim('You pop some painkillers and tape up. The show must go on.')}")
+                player.painkiller_level = min(100, player.painkiller_level + 5)
+                player.backstage_rep += 3
+                # Temporarily mark moderate injuries as non-blocking
+                state._working_injured = True
+            else:
+                print(f"  {dim('Smart. You sit this one out and let your body heal.')}")
+                player.health = min(100, player.health + 10)
+                state._working_injured = False
 
     # Process storyline beats
     if state.active_storyline:
         from game.events.storylines import advance_storyline
         advance_storyline(state)
+    elif state.total_weeks >= 8 and random.random() < 0.15:
+        # No active storyline - chance to organically start a feud
+        _try_generate_feud(state)
 
     # Random events
     process_weekly_events(state)
@@ -105,8 +125,18 @@ def run_week(state):
 
     # Show phase - match if booked
     ppv = _is_ppv_week(state)
-    if player.can_wrestle():
+    can_work = player.can_wrestle() or getattr(state, '_working_injured', False)
+    if can_work:
         show_phase(state, is_ppv=ppv)
+        # Working injured increases re-injury risk after the match
+        if getattr(state, '_working_injured', False):
+            from game.systems.injury import roll_for_injury, apply_injury
+            if random.random() < 0.25:
+                injury = roll_for_injury(player, "standard_singles", "go_all_out")
+                if injury:
+                    print(f"\n  {colored('Working through the pain made things worse!', Colors.INJURY)}")
+                    apply_injury(player, injury)
+            state._working_injured = False
     else:
         print(f"\n  {dim('No match this week - recovering from injury.')}")
 
@@ -129,6 +159,10 @@ def run_week(state):
         state.contract["weeks_remaining"] -= 1
         if state.contract["weeks_remaining"] <= 0:
             _handle_contract_expiry(state)
+
+    # Simulate NPC title defenses in the background
+    if state.title_manager and state.current_week % 4 == 0:
+        _simulate_npc_title_defenses(state)
 
     # Monthly checks (every 4 weeks)
     if state.current_week % 4 == 0:
@@ -171,6 +205,10 @@ def show_phase(state, is_ppv=False):
         return
 
     promo = PROMOTIONS.get(player.current_promotion)
+    promo_id = player.current_promotion
+
+    # Check if this is a title match
+    title_match_info = _check_title_match(state, opponent, is_ppv)
 
     # Determine match type
     from game.match.simulation import get_available_match_types
@@ -194,15 +232,31 @@ def show_phase(state, is_ppv=False):
         else:
             match_type_id = "standard_singles"
 
+    # Display title match banner
+    if title_match_info:
+        title_name = title_match_info["title_name"]
+        print(f"\n  {colored(f'🏆 TITLE MATCH: {title_name} 🏆', Colors.GOLD)}")
+        if title_match_info["player_is_champion"]:
+            print(f"  {bold('Champion:')} {player.ring_name} vs. Challenger: {opponent.ring_name}")
+        else:
+            print(f"  Champion: {opponent.ring_name} vs. {bold('Challenger:')} {player.ring_name}")
+
     # Determine if player is booked to win
     booked_to_win = determine_booking(state, opponent)
 
     # Run the match
-    print_subheader(f"{'PPV MAIN EVENT' if is_ppv else 'MATCH'}: {player.ring_name} vs. {opponent.ring_name}")
+    header = 'PPV MAIN EVENT' if is_ppv else 'MATCH'
+    if title_match_info:
+        header += f" - {title_match_info['title_name']}"
+    print_subheader(f"{header}: {player.ring_name} vs. {opponent.ring_name}")
     result = run_match(player, opponent, match_type_id, booked_to_win, state)
 
     # Apply results
     apply_match_results(state, result, opponent, is_ppv)
+
+    # Resolve title match outcome
+    if title_match_info and result:
+        _resolve_title_result(state, result, opponent, title_match_info)
 
 
 def pick_opponent(state, roster, is_ppv):
@@ -481,6 +535,159 @@ def weekly_menu(state):
             state.game_over = True
             state.game_over_reason = "retirement"
             state.log_career_event(f"Retired from professional wrestling at age {state.player.age}")
+
+
+def _try_generate_feud(state):
+    """Try to organically generate a feud with a roster member."""
+    from game.events.storylines import generate_storyline
+
+    roster = state.get_current_roster()
+    if not roster:
+        return
+
+    # Prefer opponents the player has a relationship with (positive or negative)
+    candidates = []
+    for npc in roster:
+        if not npc.can_wrestle():
+            continue
+        rel = state.player.relationships.get(npc.npc_id, 0)
+        # Strong relationship (positive or negative) = more likely feud
+        weight = 1.0 + abs(rel) / 20.0
+        # Champions make good feud targets
+        if state.title_manager and state.title_manager.is_champion(npc.npc_id, state.player.current_promotion):
+            weight *= 2.0
+        # Similar skill level = more compelling
+        rating_diff = abs(state.player.get_overall_rating() - npc.get_overall_rating())
+        if rating_diff < 15:
+            weight *= 1.5
+        candidates.append((npc, weight))
+
+    if not candidates:
+        return
+
+    weights = [w for _, w in candidates]
+    opponent = random.choices([c for c, _ in candidates], weights=weights, k=1)[0]
+
+    storyline = generate_storyline(state, opponent)
+    if storyline:
+        state.active_storyline = storyline
+        print_subheader("A NEW RIVALRY BEGINS")
+        print(f"  {colored(storyline['name'], Colors.GOLD)}")
+        print(f"  A feud is brewing between you and {opponent.ring_name}...")
+        state.log_career_event(f"Started feud with {opponent.ring_name}")
+
+
+def _check_title_match(state, opponent, is_ppv):
+    """Check if this match should be a title match.
+
+    Returns dict with title info or None.
+    """
+    if not state.title_manager:
+        return None
+
+    promo_id = state.player.current_promotion
+    player = state.player
+    champions = state.title_manager.get_all_champions(promo_id)
+
+    for title_name, reign in champions.items():
+        if reign is None:
+            continue
+
+        opp_id = opponent.npc_id if opponent.npc_id else "player"
+
+        # Opponent is the champion and player is challenger
+        if reign.holder_id == opp_id:
+            # Title matches happen at PPVs, or if in a title chase storyline
+            is_title_chase = (state.active_storyline and
+                              state.active_storyline.get("type") == "title_chase" and
+                              state.active_storyline.get("opponent_id") == opp_id)
+            if is_ppv or is_title_chase:
+                return {
+                    "title_name": title_name,
+                    "player_is_champion": False,
+                    "champion_id": opp_id,
+                    "challenger_id": "player",
+                }
+
+        # Player is the champion defending
+        if reign.holder_id == "player":
+            # Champions defend at PPVs, or 30% chance on regular shows
+            if is_ppv or random.random() < 0.3:
+                return {
+                    "title_name": title_name,
+                    "player_is_champion": True,
+                    "champion_id": "player",
+                    "challenger_id": opp_id,
+                }
+
+    return None
+
+
+def _resolve_title_result(state, result, opponent, title_info):
+    """Resolve a title match outcome through the TitleManager."""
+    player = state.player
+    promo_id = player.current_promotion
+    title_name = title_info["title_name"]
+    winner = result.get("winner")
+
+    if title_info["player_is_champion"]:
+        champion = player
+        challenger = opponent
+        match_result = "champion_wins" if winner == "player" else "challenger_wins"
+    else:
+        champion = opponent
+        challenger = player
+        match_result = "champion_wins" if winner == "opponent" else "challenger_wins"
+
+    current_week = state.calendar.get_current_week_number() if state.calendar else state.total_weeks
+    outcome = state.title_manager.resolve_title_match(
+        promo_id, title_name, champion, challenger, match_result, current_week,
+    )
+
+    if outcome.get("title_change"):
+        new_champ = outcome["new_champion"]
+        former = outcome["former_champion"]
+        print(f"\n  {colored(f'★ NEW CHAMPION! {new_champ} wins the {title_name}! ★', Colors.GOLD)}")
+        state.log_career_event(f"Won the {title_name} by defeating {former}")
+
+        # Update player tracking
+        if winner == "player":
+            if title_name not in player.titles_held:
+                player.titles_held.append(title_name)
+            if title_name not in player.career_titles:
+                player.career_titles.append(title_name)
+            player.popularity = min(100, player.popularity + 10)
+        else:
+            if title_name in player.titles_held:
+                player.titles_held.remove(title_name)
+                state.log_career_event(f"Lost the {title_name} to {opponent.ring_name}")
+    else:
+        if title_info["player_is_champion"] and winner == "player":
+            defenses = outcome.get("defenses", 0)
+            print(f"\n  {colored(f'Champion retains! Defense #{defenses}', Colors.GREEN)}")
+        elif not title_info["player_is_champion"] and winner == "opponent":
+            print(f"\n  {colored(f'{opponent.ring_name} retains the {title_name}.', Colors.RED)}")
+
+
+def _simulate_npc_title_defenses(state):
+    """Simulate NPC title defenses in other promotions."""
+    from game.world.promotions import PROMOTIONS
+    current_week = state.calendar.get_current_week_number() if state.calendar else state.total_weeks
+
+    for promo_id, roster in state.promotion_rosters.items():
+        if promo_id == state.player.current_promotion:
+            continue  # Player's promotion titles handled in show_phase
+        champions = state.title_manager.get_all_champions(promo_id)
+        for title_name, reign in champions.items():
+            if reign is None:
+                continue
+            if random.random() < 0.15:  # 15% chance per month
+                result = state.title_manager.simulate_npc_title_defense(
+                    promo_id, title_name, roster, current_week,
+                )
+                if result and result.get("title_change"):
+                    # Silently record - player won't see this unless they check
+                    pass
 
 
 def _is_ppv_week(state):
