@@ -112,6 +112,32 @@ def print_stats(wrestler):
     print(f"  {'Money':<14} {colored(f'${wrestler.money:,}', Colors.MONEY)}")
     print(f"  {'Health':<14} {wrestler.health}%")
 
+    # CTE / Brain health
+    cte = getattr(wrestler, 'cte_severity', 0)
+    conc_count = getattr(wrestler, 'concussion_count', 0)
+    if conc_count > 0 or cte > 0:
+        print()
+        cte_color = Colors.GREEN if cte < 20 else Colors.YELLOW if cte < 50 else Colors.RED
+        print(f"  {'Brain Health':<14} {colored(f'CTE: {cte}/100', cte_color)} | Concussions: {conc_count}")
+
+    # Business summary
+    merch = getattr(wrestler, 'merch_level', 0)
+    merch_total = getattr(wrestler, 'merch_income_total', 0)
+    followers = getattr(wrestler, 'social_media_followers', 0)
+    deals = getattr(wrestler, 'brand_deals', [])
+    investments = getattr(wrestler, 'business_investments', [])
+    if merch > 0 or deals or investments or followers > 0:
+        print()
+        print(f"  {bold('Business:')}")
+        if merch > 0:
+            print(f"    Merch Tier {merch} | Lifetime: ${merch_total:,}")
+        if followers > 0:
+            print(f"    Followers: {followers:,}")
+        if deals:
+            print(f"    Brand Deals: {len(deals)} active")
+        if investments:
+            print(f"    Investments: {len(investments)}")
+
 
 def get_alignment_string(alignment):
     """Get alignment zone name from value."""

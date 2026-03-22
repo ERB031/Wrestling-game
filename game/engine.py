@@ -88,10 +88,20 @@ def run_week(state):
     if player.is_injured():
         severe = [i for i in player.injuries if i.weeks_remaining > 0 and i.severity >= 3]
         moderate = [i for i in player.injuries if i.weeks_remaining > 0 and i.severity == 2]
+        concussions = [i for i in player.injuries if i.weeks_remaining > 0 and "concussion" in i.description.lower()]
         if severe:
-            print(f"\n  {colored('You are currently injured and cannot wrestle.', Colors.INJURY)}")
-            for inj in severe:
-                print(f"    - {inj.description}: {inj.weeks_remaining} weeks remaining")
+            # Check if it's ONLY a concussion at severity 3 - allow risky choice
+            severe_concussions = [i for i in severe if "concussion" in i.description.lower()]
+            non_conc_severe = [i for i in severe if "concussion" not in i.description.lower()]
+            if severe_concussions and not non_conc_severe:
+                _present_concussion_choice(state, severe_concussions)
+            else:
+                print(f"\n  {colored('You are currently injured and cannot wrestle.', Colors.INJURY)}")
+                for inj in severe:
+                    print(f"    - {inj.description}: {inj.weeks_remaining} weeks remaining")
+        elif concussions:
+            # Moderate concussions get a special prompt with CTE warning
+            _present_concussion_choice(state, concussions)
         elif moderate:
             print(f"\n  {colored('You are hurt. These injuries are nagging:', Colors.WARNING)}")
             for inj in moderate:
@@ -102,7 +112,6 @@ def run_week(state):
                 print(f"  {dim('You pop some painkillers and tape up. The show must go on.')}")
                 player.painkiller_level = min(100, player.painkiller_level + 5)
                 player.backstage_rep += 3
-                # Temporarily mark moderate injuries as non-blocking
                 state._working_injured = True
             else:
                 print(f"  {dim('Smart. You sit this one out and let your body heal.')}")
@@ -136,6 +145,29 @@ def run_week(state):
                 if injury:
                     print(f"\n  {colored('Working through the pain made things worse!', Colors.INJURY)}")
                     apply_injury(player, injury)
+            # Extra concussion risk when competing concussed
+            if getattr(state, '_competing_concussed', False):
+                if random.random() < 0.35:
+                    from game.character.wrestler import Injury
+                    sev = random.choices([2, 3, 4], weights=[3, 2, 1])[0]
+                    names = {2: "Concussion (Second Impact)", 3: "Severe Concussion", 4: "Traumatic Brain Injury"}
+                    weeks = {2: (3, 8), 3: (8, 16), 4: (16, 40)}
+                    w = weeks[sev]
+                    conc = Injury(
+                        body_part="head", severity=sev,
+                        description=names[sev],
+                        weeks_remaining=random.randint(w[0], w[1]),
+                        chronic=sev >= 3,
+                        stat_penalties={"in_ring": sev * 3, "psychology": sev * 3, "charisma": sev * 2},
+                    )
+                    apply_injury(player, conc)
+                    player.concussion_count += 1
+                    player.cte_severity = min(100, player.cte_severity + sev * 8)
+                    player.body_damage["head"] = min(100, player.body_damage["head"] + sev * 6)
+                    print(f"\n  {colored('Competing with a concussion was a terrible idea. Another head injury.', Colors.RED)}")
+                    if sev == 4:
+                        print(f"  {colored('This could be career-ending.', Colors.RED)}")
+                state._competing_concussed = False
             state._working_injured = False
     else:
         print(f"\n  {dim('No match this week - recovering from injury.')}")
@@ -147,6 +179,12 @@ def run_week(state):
     player.heal_week()
     tick_addictions(player)
     process_injury_recovery(player)
+
+    # Weekly business income
+    from game.systems.business import process_weekly_business
+    biz_income = process_weekly_business(player)
+    if biz_income >= 200:
+        print(f"\n  {colored(f'Business income this week: +${biz_income:,}', Colors.MONEY)}")
 
     # Decrement event cooldowns
     for event_id in list(state.event_cooldowns.keys()):
@@ -392,6 +430,38 @@ def apply_match_results(state, result, opponent, is_ppv):
         "ppv": is_ppv,
     })
 
+    # Fan interest bonuses from high-interest matches
+    fan_interest = result.get("fan_interest_total", 0)
+    if fan_interest >= 25:
+        # Viral match - big career boost
+        fan_pop_bonus = min(8, fan_interest // 5)
+        player.popularity = max(0, min(100, player.popularity + fan_pop_bonus))
+        player.momentum = min(10, player.momentum + 1)
+        player.social_media_followers = getattr(player, 'social_media_followers', 0) + fan_interest * 100
+        # Extra XP from crowd-pleasing performance
+        for skill in ("charisma", "mic_work"):
+            player.add_skill_xp(skill, fan_interest // 3)
+        print(f"\n  {colored(f'The crowd loved it! +{fan_pop_bonus} popularity. Social media is buzzing!', Colors.GOLD)}")
+    elif fan_interest >= 15:
+        fan_pop_bonus = min(4, fan_interest // 5)
+        player.popularity = max(0, min(100, player.popularity + fan_pop_bonus))
+        player.social_media_followers = getattr(player, 'social_media_followers', 0) + fan_interest * 50
+        player.add_skill_xp("charisma", fan_interest // 5)
+
+    # Merch sales bump from good matches
+    merch_level = getattr(player, 'merch_level', 0)
+    if merch_level > 0 and fan_interest >= 10:
+        merch_cut = getattr(player, 'merch_cut_pct', 10)
+        base_merch = fan_interest * merch_level * 5
+        if is_ppv:
+            base_merch *= 3
+        merch_earnings = int(base_merch * merch_cut / 100)
+        player.money += merch_earnings
+        player.total_earnings += merch_earnings
+        player.merch_income_total = getattr(player, 'merch_income_total', 0) + merch_earnings
+        if merch_earnings >= 100:
+            print(f"  {colored(f'Merch sales: +${merch_earnings:,}', Colors.MONEY)}")
+
     # Log notable matches
     if rating >= 4.0:
         state.log_career_event(
@@ -412,6 +482,7 @@ def off_day_phase(state):
         ("Rest", "Recover health and let your body heal"),
         ("Go Out", "Hit the town - bars, clubs, social scene"),
         ("Study Tape", "Watch matches and study the craft"),
+        ("Manage Business", "Merch, brand deals, investments"),
     ]
 
     # Add relationship option if in one
@@ -432,7 +503,6 @@ def off_day_phase(state):
     elif choice == 2:  # Go out
         present_lifestyle_choices(player, "night_out")
     elif choice == 3:  # Study tape
-        # Small boost to psychology and in_ring
         from game.character.skills import train_skill
         xp = random.randint(5, 12)
         skill = random.choice(["psychology", "in_ring"])
@@ -440,7 +510,10 @@ def off_day_phase(state):
         from data.constants import SKILL_DISPLAY_NAMES
         print(f"\n  You study wrestling tapes for hours.")
         print(f"  {SKILL_DISPLAY_NAMES[skill]} +{xp} XP" + (" - LEVEL UP!" if leveled else ""))
-    elif choice == 4:  # Relationship
+    elif choice == 4:  # Business
+        from game.systems.business import present_business_menu
+        present_business_menu(player)
+    elif choice == 5:  # Relationship
         player.relationship_health = min(100, player.relationship_health + 10)
         player.burnout = max(0, player.burnout - 3)
         print(f"\n  You spend quality time with {player.relationship_partner or 'your partner'}.")
@@ -504,6 +577,7 @@ def weekly_menu(state):
         "Continue to next week",
         "View stats",
         "View career history",
+        "Manage business",
         "Save game",
         "Retire",
     ]
@@ -528,13 +602,77 @@ def weekly_menu(state):
         press_enter()
         weekly_menu(state)
     elif choice == 3:
-        present_save_menu(state)
+        clear_screen()
+        from game.systems.business import present_business_menu
+        present_business_menu(state.player)
+        press_enter()
         weekly_menu(state)
     elif choice == 4:
+        present_save_menu(state)
+        weekly_menu(state)
+    elif choice == 5:
         if confirm("Are you sure you want to retire?"):
             state.game_over = True
             state.game_over_reason = "retirement"
             state.log_career_event(f"Retired from professional wrestling at age {state.player.age}")
+
+
+def _present_concussion_choice(state, concussion_injuries):
+    """Present the choice to wrestle through a concussion with CTE risks."""
+    player = state.player
+    worst = max(concussion_injuries, key=lambda i: i.severity)
+
+    print(f"\n  {colored('CONCUSSION PROTOCOL', Colors.INJURY)}")
+    for inj in concussion_injuries:
+        print(f"    - {inj.description}: {inj.weeks_remaining} weeks remaining")
+
+    # Show CTE warning based on history
+    if player.concussion_count >= 5:
+        print(f"\n  {colored(f'WARNING: This is concussion #{player.concussion_count + 1} of your career.', Colors.RED)}")
+        print(f"  {colored(f'CTE Severity: {player.cte_severity}/100', Colors.RED)}")
+    elif player.concussion_count >= 2:
+        print(f"\n  {colored(f'Caution: You have had {player.concussion_count} concussions in your career.', Colors.WARNING)}")
+
+    if player.weeks_since_concussion < 8:
+        print(f"  {colored('Your last concussion was only {0} weeks ago. Second-impact risk is HIGH.'.format(player.weeks_since_concussion), Colors.RED)}")
+
+    options = [
+        ("Sit out and recover", f"Rest {worst.weeks_remaining} weeks. Protect your brain."),
+        ("Compete anyway", "Risk CTE damage. Increased injury chance. The show must go on."),
+    ]
+    if worst.severity >= 3:
+        options[1] = ("Compete anyway (DANGEROUS)", "Severe risk of permanent brain damage. Doctors advise against it.")
+
+    choice = print_menu(options, "What do you do?")
+
+    if choice == 0:
+        print(f"\n  {dim('You follow concussion protocol. Your brain will thank you later.')}")
+        player.health = min(100, player.health + 10)
+        state._working_injured = False
+    else:
+        # Competing with a concussion
+        cte_gain = worst.severity * 5
+        if player.weeks_since_concussion < 8:
+            cte_gain *= 2  # Second-impact syndrome
+            print(f"\n  {colored('SECOND IMPACT RISK: Competing so soon after a concussion is extremely dangerous.', Colors.RED)}")
+        else:
+            print(f"\n  {colored('You ignore medical advice and suit up. The crowd will never know.', Colors.WARNING)}")
+
+        player.cte_severity = min(100, player.cte_severity + cte_gain)
+        player.painkiller_level = min(100, player.painkiller_level + 10)
+        player.backstage_rep += 5  # Respect for toughness
+        state._working_injured = True
+        state._competing_concussed = True
+
+        # CTE symptoms at high levels
+        if player.cte_severity >= 60:
+            symptoms = random.choice([
+                "Your hands are trembling. You can't make it stop.",
+                "The headaches are constant now. Light hurts.",
+                "You forgot where you parked. Again.",
+                "Your mood swings are getting worse. Everyone notices.",
+            ])
+            print(f"  {dim(symptoms)}")
 
 
 def _try_generate_feud(state):

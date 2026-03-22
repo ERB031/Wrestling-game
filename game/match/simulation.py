@@ -60,6 +60,7 @@ def run_match(player, opponent, match_type_id, booked_to_win, state):
         "crowd_heat": 0,
         "blood": False,
         "approach": None,
+        "fan_interest_total": 0,  # Accumulated fan interest from move picks
     }
 
     # Phase 1: Pre-match approach
@@ -160,6 +161,9 @@ def run_match(player, opponent, match_type_id, booked_to_win, state):
         )
         apply_injury(player, conc)
         player.body_damage["head"] = min(100, player.body_damage["head"] + severity * 5)
+        player.concussion_count = getattr(player, 'concussion_count', 0) + 1
+        player.cte_severity = min(100, getattr(player, 'cte_severity', 0) + severity * 5)
+        player.weeks_since_concussion = 0
         print(f"    {colored('You took too many shots to the head tonight.', Colors.INJURY)}")
 
     # XP gains
@@ -176,6 +180,7 @@ def run_match(player, opponent, match_type_id, booked_to_win, state):
         "popularity_change": pop_change,
         "alignment_change": alignment_change,
         "rep_change": rep_change,
+        "fan_interest_total": match_state.get("fan_interest_total", 0),
         "had_promo": False,
         "breakdown": breakdown,
     }
@@ -501,6 +506,10 @@ def resolve_choice(player, opponent, match_type, match_state, choice, phase):
 
         if choice.get("is_weapon"):
             match_state["dramatic_moments"] += 1
+
+        # Accumulate fan interest from successful moves
+        if move_data:
+            match_state["fan_interest_total"] += move_data.get("fan_interest", 0)
 
         # High fan-interest moves get crowd reactions
         if move_data and move_data.get("fan_interest", 0) >= 7:

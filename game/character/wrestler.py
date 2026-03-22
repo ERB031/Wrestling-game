@@ -103,6 +103,20 @@ class Wrestler:
     peak_popularity: int = 0
     weeks_as_champion: int = 0
 
+    # CTE / concussion tracking
+    concussion_count: int = 0       # Lifetime concussions
+    cte_severity: int = 0           # 0-100, accumulated brain damage
+    weeks_since_concussion: int = 99  # Weeks since last concussion (high = safe)
+
+    # Business / merch
+    merch_level: int = 0            # 0-5: none, basic, standard, premium, deluxe, empire
+    merch_cut_pct: int = 0          # % of merch revenue player keeps (0-100)
+    social_media_followers: int = 0 # Influences merch sales and appearance fees
+    appearance_fee: int = 0         # Per-appearance income outside matches
+    brand_deals: list = field(default_factory=list)  # Active endorsement deals
+    merch_income_total: int = 0     # Lifetime merch earnings
+    business_investments: list = field(default_factory=list)  # Investments like gym, school, etc.
+
     # NPC id
     npc_id: str = ""
 
@@ -138,6 +152,11 @@ class Wrestler:
         # Burnout penalty
         if self.burnout > 70:
             base -= (self.burnout - 70) // 10
+
+        # CTE degradation (permanent)
+        if self.cte_severity > 30:
+            if skill_name in ("in_ring", "psychology", "charisma", "mic_work"):
+                base -= (self.cte_severity - 30) // 10
 
         return max(SKILL_MIN, min(SKILL_MAX, base))
 
@@ -208,6 +227,9 @@ class Wrestler:
         for part in self.body_damage:
             if self.body_damage[part] > 0:
                 self.body_damage[part] = max(0, self.body_damage[part] - random.uniform(0.1, 0.5))
+
+        # Track weeks since last concussion
+        self.weeks_since_concussion = min(999, self.weeks_since_concussion + 1)
 
     def to_dict(self):
         """Serialize to dict for saving."""
